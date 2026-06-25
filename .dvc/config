@@ -1,0 +1,6 @@
+[core]
+    remote = myremote
+['remote "storage"']
+    url = s3://chinguyen2003/dvcstore
+['remote "myremote"']
+    url = s3://chinguyen2003/dvc

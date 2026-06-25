@@ -9,3 +9,16 @@ outputs/
 .env
 *.png
 *.jpg
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.vscode/
+mlruns/
+mlflow.db
+models/
+outputs/
+*.pem
+.env
+metrics*.json
+data/*.csv

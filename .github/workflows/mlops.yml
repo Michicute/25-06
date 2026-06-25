@@ -1,0 +1,128 @@
+name: MLOps Pipeline
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'data/**.dvc'
+      - 'src/**.py'
+      - 'params.yaml'
+      - 'tests/**.py'
+      - 'requirements.txt'
+      - '.github/workflows/mlops.yml'
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest tests/ -v
+
+  train:
+    name: Train
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      accuracy: ${{ steps.read_metrics.outputs.accuracy }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Authenticate to AWS
+        run: |
+          python - <<'EOF' >> $GITHUB_ENV
+          import json, os
+          creds = json.loads(os.environ["CLOUD_CREDENTIALS"])
+          print(f"AWS_ACCESS_KEY_ID={creds['aws_access_key_id']}")
+          print(f"AWS_SECRET_ACCESS_KEY={creds['aws_secret_access_key']}")
+          print("AWS_DEFAULT_REGION=us-east-1")
+          EOF
+        env:
+          CLOUD_CREDENTIALS: ${{ secrets.CLOUD_CREDENTIALS }}
+
+      - name: Pull data with DVC
+        run: dvc pull
+
+      - name: Train model
+        run: python src/train.py
+
+      - name: Read metrics
+        id: read_metrics
+        run: |
+          accuracy=$(python -c "import json; print(json.load(open('outputs/metrics.json'))['accuracy'])")
+          echo "accuracy=$accuracy" >> $GITHUB_OUTPUT
+
+      - name: Upload model to S3
+        run: |
+          python - <<'EOF'
+          import os
+          import boto3
+
+          bucket = os.environ["CLOUD_BUCKET"]
+          s3 = boto3.client("s3")
+          s3.upload_file(
+              "models/model.pkl",
+              bucket,
+              "models/latest/model.pkl"
+          )
+          print(f"Uploaded models/model.pkl to s3://{bucket}/models/latest/model.pkl")
+          EOF
+        env:
+          CLOUD_BUCKET: ${{ secrets.CLOUD_BUCKET }}
+
+      - name: Save metrics as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics
+          path: outputs/metrics.json
+
+  eval:
+    name: Eval
+    needs: train
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check eval gate
+        run: |
+          python - <<'EOF'
+          acc = float("${{ needs.train.outputs.accuracy }}")
+          threshold = 0.70
+
+          if acc < threshold:
+              raise SystemExit(f"Accuracy {acc:.4f} < threshold {threshold}")
+
+          print(f"Accuracy {acc:.4f} >= threshold {threshold}. Deploy allowed.")
+          EOF
+
+  deploy:
+    name: Deploy
+    needs: eval
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restart service on EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            sudo systemctl restart mlops-serve
+            sleep 5
+            curl -f http://localhost:8000/health || exit 1
